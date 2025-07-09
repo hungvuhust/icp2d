@@ -63,18 +63,19 @@ void test_omp_basic_functionality() {
   cloud.addPoint(1.0, 1.0);
   cloud.addPoint(0.5, 0.5);
 
-  icp2d::KdTreeBuilderOMP                 builder(2); // Use 2 threads
-  icp2d::UnsafeKdTree<SimplePointCloud2D> kdtree(cloud, builder);
+  icp2d::KdTreeBuilderOMP<icp2d::AxisAlignedProjection> builder(
+      2); // Use 2 threads
+  icp2d::UnsafeKdTree<SimplePointCloud2D, icp2d::AxisAlignedProjection> kdtree(
+      cloud, builder);
 
   // Test nearest neighbor search
   Eigen::Vector2d query(0.1, 0.1);
   size_t          nearest_idx;
   double          nearest_dist;
 
-  size_t found =
-      kdtree.nearest_neighbor_search(query, &nearest_idx, &nearest_dist);
+  bool found = kdtree.nearest(query, &nearest_idx, &nearest_dist);
 
-  assert(found == 1);
+  assert(found);
   assert(nearest_idx == 0); // Should find point (0,0)
 
   std::cout << "  Query: (" << query.x() << ", " << query.y() << ")"
@@ -105,17 +106,20 @@ void test_omp_performance_comparison() {
             << std::endl;
 
   // Test sequential builder
-  auto                 start = std::chrono::high_resolution_clock::now();
-  icp2d::KdTreeBuilder seq_builder;
-  icp2d::UnsafeKdTree<SimplePointCloud2D> seq_kdtree(cloud, seq_builder);
+  auto start = std::chrono::high_resolution_clock::now();
+  icp2d::KdTreeBuilder<icp2d::AxisAlignedProjection> seq_builder;
+  icp2d::UnsafeKdTree<SimplePointCloud2D, icp2d::AxisAlignedProjection>
+       seq_kdtree(cloud, seq_builder);
   auto end = std::chrono::high_resolution_clock::now();
   auto seq_duration =
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
   // Test parallel builder
   start = std::chrono::high_resolution_clock::now();
-  icp2d::KdTreeBuilderOMP                 omp_builder(4); // Use 4 threads
-  icp2d::UnsafeKdTree<SimplePointCloud2D> omp_kdtree(cloud, omp_builder);
+  icp2d::KdTreeBuilderOMP<icp2d::AxisAlignedProjection> omp_builder(
+      4); // Use 4 threads
+  icp2d::UnsafeKdTree<SimplePointCloud2D, icp2d::AxisAlignedProjection>
+      omp_kdtree(cloud, omp_builder);
   end = std::chrono::high_resolution_clock::now();
   auto omp_duration =
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -131,8 +135,8 @@ void test_omp_performance_comparison() {
   size_t seq_idx, omp_idx;
   double seq_dist, omp_dist;
 
-  seq_kdtree.nearest_neighbor_search(query, &seq_idx, &seq_dist);
-  omp_kdtree.nearest_neighbor_search(query, &omp_idx, &omp_dist);
+  seq_kdtree.nearest(query, &seq_idx, &seq_dist);
+  omp_kdtree.nearest(query, &omp_idx, &omp_dist);
 
   // Results should be identical (or very close due to tie-breaking)
   double dist_diff = std::abs(std::sqrt(seq_dist) - std::sqrt(omp_dist));
@@ -155,14 +159,15 @@ void test_omp_correctness() {
   std::uniform_real_distribution<double> dis(0.0, 10.0);
 
   SimplePointCloud2D cloud;
-  const int          num_points = 1000;
+  const int          num_points = 10000;
 
   for (int i = 0; i < num_points; i++) {
     cloud.addPoint(dis(gen), dis(gen));
   }
 
-  icp2d::KdTreeBuilderOMP                 builder(2);
-  icp2d::UnsafeKdTree<SimplePointCloud2D> kdtree(cloud, builder);
+  icp2d::KdTreeBuilderOMP<icp2d::AxisAlignedProjection> builder(2);
+  icp2d::UnsafeKdTree<SimplePointCloud2D, icp2d::AxisAlignedProjection> kdtree(
+      cloud, builder);
 
   // Test multiple queries
   for (int test = 0; test < 20; test++) {
@@ -171,7 +176,7 @@ void test_omp_correctness() {
     // KDTree search
     size_t kd_nearest_idx;
     double kd_nearest_dist;
-    kdtree.nearest_neighbor_search(query, &kd_nearest_idx, &kd_nearest_dist);
+    kdtree.nearest(query, &kd_nearest_idx, &kd_nearest_dist);
 
     // Brute force search for verification
     size_t bf_nearest_idx  = 0;
@@ -206,12 +211,13 @@ void test_different_thread_counts() {
 
   // Test with different thread counts
   for (int threads : {1, 2, 4, 8}) {
-    icp2d::KdTreeBuilderOMP                 builder(threads);
-    icp2d::UnsafeKdTree<SimplePointCloud2D> kdtree(cloud, builder);
+    icp2d::KdTreeBuilderOMP<icp2d::AxisAlignedProjection> builder(threads);
+    icp2d::UnsafeKdTree<SimplePointCloud2D, icp2d::AxisAlignedProjection>
+        kdtree(cloud, builder);
 
     size_t nearest_idx;
     double nearest_dist;
-    kdtree.nearest_neighbor_search(query, &nearest_idx, &nearest_dist);
+    kdtree.nearest(query, &nearest_idx, &nearest_dist);
 
     std::cout << "  " << threads << " threads: found point " << nearest_idx
               << " at distance " << std::sqrt(nearest_dist) << std::endl;

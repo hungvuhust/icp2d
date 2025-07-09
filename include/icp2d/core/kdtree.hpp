@@ -38,201 +38,216 @@
  *************************************************************************/
 #pragma once
 
+#include "icp2d/core/knn_result.hpp"
+#include "icp2d/core/projection.hpp"
+#include "icp2d/core/traits.hpp"
 #include <Eigen/Core>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <numeric>
-
-#include <icp2d/core/knn_result.hpp>
-#include <icp2d/core/projection.hpp>
-#include <icp2d/core/traits.hpp>
+#include <vector>
 
 namespace icp2d {
 
-using NodeIndexType = std::uint32_t;
-static constexpr NodeIndexType INVALID_NODE =
-    std::numeric_limits<NodeIndexType>::max();
+// Forward declarations
+template <typename PointCloud, typename Projection = AxisAlignedProjection>
+struct UnsafeKdTree;
+
+template <typename PointCloud, typename Projection = AxisAlignedProjection>
+struct SafeKdTree;
+
+template <typename PointCloud, typename Projection = AxisAlignedProjection>
+struct KdTree;
 
 /// @brief KdTree node.
 template <typename Projection> struct KdTreeNode {
-  bool is_leaf = true; ///< True if this is a leaf node
+  // Node type
+  bool is_leaf = false; ///< Whether this node is a leaf node.
 
   // Leaf node data
-  NodeIndexType first =
+  size_t first =
       0; ///< First point index in the leaf node (valid when is_leaf = true)
-  NodeIndexType last =
+  size_t last =
       0; ///< Last point index in the leaf node (valid when is_leaf = true)
 
-  // Non-leaf node data
-  Projection proj;         ///< Projection axis (valid when is_leaf = false)
+  // Internal node data
+  Projection proj;         ///< Projection function (valid when is_leaf = false)
   double     thresh = 0.0; ///< Threshold value (valid when is_leaf = false)
 
-  NodeIndexType left  = INVALID_NODE; ///< Left child node index.
-  NodeIndexType right = INVALID_NODE; ///< Right child node index.
+  size_t left = std::numeric_limits<size_t>::max(); ///< Left child node index.
+  size_t right =
+      std::numeric_limits<size_t>::max(); ///< Right child node index.
 
   // Default constructor
   KdTreeNode() = default;
 
   // Helper methods
-  void set_as_leaf(NodeIndexType f, NodeIndexType l) {
+  void set_as_leaf(size_t f, size_t l) {
     is_leaf = true;
     first   = f;
     last    = l;
   }
 
-  void set_as_nonleaf(const Projection &p, double t) {
+  void set_as_internal(const Projection &p, double t, size_t l, size_t r) {
     is_leaf = false;
     proj    = p;
     thresh  = t;
+    left    = l;
+    right   = r;
   }
 };
 
-/// @brief Single thread Kd-tree builder.
-struct KdTreeBuilder {
-public:
-  /// @brief Build KdTree
-  /// @param kdtree         Kd-tree to build
-  /// @param points         Point cloud
+/// @brief KdTree builder.
+template <typename Projection> struct KdTreeBuilder {
+  /// @brief Build KdTree.
+  /// @param kdtree  KdTree to build
+  /// @param points  Point cloud
   template <typename KdTree, typename PointCloud>
   void build_tree(KdTree &kdtree, const PointCloud &points) const {
-    kdtree.indices.resize(traits::size(points));
-    std::iota(kdtree.indices.begin(), kdtree.indices.end(), 0);
+    const size_t N = traits::size(points);
+    if (N == 0) {
+      return;
+    }
 
+    // Initialize nodes
+    kdtree.nodes.resize(2 * N - 1);
     size_t node_count = 0;
-    kdtree.nodes.resize(traits::size(points));
+
+    // Build tree recursively
     kdtree.root =
         create_node(kdtree, node_count, points, kdtree.indices.begin(),
                     kdtree.indices.begin(), kdtree.indices.end());
+
+    // Shrink nodes
     kdtree.nodes.resize(node_count);
   }
 
-  /// @brief Create a Kd-tree node from the given point indices.
-  /// @param global_first     Global first point index iterator (i.e.,
-  /// this->indices.begin()).
-  /// @param first            First point index iterator to be scanned.
-  /// @param last             Last point index iterator to be scanned.
-  /// @return                 Index of the created node.
+protected:
+  /// @brief Create a node recursively.
+  /// @param kdtree        KdTree to build
+  /// @param node_count    Number of nodes (will be updated)
+  /// @param points        Point cloud
+  /// @param global_first  First iterator of the global indices
+  /// @param first        First iterator of the current node
+  /// @param last         Last iterator of the current node
+  /// @return             Index of the created node.
   template <typename PointCloud, typename KdTree, typename IndexConstIterator>
-  NodeIndexType
-  create_node(KdTree &kdtree, size_t &node_count, const PointCloud &points,
-              IndexConstIterator global_first, IndexConstIterator first,
-              IndexConstIterator last) const {
-    const size_t        N          = std::distance(first, last);
-    const NodeIndexType node_index = node_count++;
-    auto               &node       = kdtree.nodes[node_index];
+  size_t create_node(KdTree &kdtree, size_t &node_count,
+                     const PointCloud &points, IndexConstIterator global_first,
+                     IndexConstIterator first, IndexConstIterator last) const {
+    const size_t N          = std::distance(first, last);
+    const size_t node_index = node_count++;
+    auto        &node       = kdtree.nodes[node_index];
 
-    // Create a leaf node.
-    if (N <= max_leaf_size) {
-      // std::sort(first, last);
+    // Create a leaf node if the number of points is small enough
+    if (N <= 1) {
       node.set_as_leaf(std::distance(global_first, first),
                        std::distance(global_first, last));
-
       return node_index;
     }
 
-    // Find the best axis to split the input points.
-    using Projection = typename KdTree::Projection;
-    const auto proj =
-        Projection::find_axis(points, first, last, projection_setting);
-    const auto median_itr = first + N / 2;
+    // Find the best split axis and threshold
+    ProjectionSetting projection_setting;
+    auto proj = Projection::find_axis(points, first, last, projection_setting);
+
+    // Find median point
+    auto median_itr = first + N / 2;
     std::nth_element(first, median_itr, last, [&](size_t i, size_t j) {
       return proj(traits::point(points, i)) < proj(traits::point(points, j));
     });
 
-    // Create a non-leaf node.
-    node.set_as_nonleaf(proj, proj(traits::point(points, *median_itr)));
+    // Get median value for threshold
+    double median_val = proj(traits::point(points, *median_itr));
 
-    // Create left and right child nodes.
-    node.left = create_node(kdtree, node_count, points, global_first, first,
-                            median_itr);
-    node.right =
+    // Create child nodes
+    const size_t left = create_node(kdtree, node_count, points, global_first,
+                                    first, median_itr);
+    const size_t right =
         create_node(kdtree, node_count, points, global_first, median_itr, last);
+
+    // Set this node as an internal node
+    node.set_as_internal(proj, median_val, left, right);
 
     return node_index;
   }
-
-public:
-  int max_leaf_size = 20; ///< Maximum number of points in a leaf node.
-  ProjectionSetting projection_setting; ///< Projection setting.
 };
 
-/// @brief "Unsafe" KdTree for 2D points.
-/// @note  This class does not hold the ownership of the input points.
-///        You must keep the input points along with this class.
-template <typename PointCloud, typename Projection_ = AxisAlignedProjection>
-struct UnsafeKdTree {
+/// @brief Unsafe KdTree implementation for 2D points.
+/// @note  This implementation is not thread-safe.
+template <typename PointCloud, typename Projection> struct UnsafeKdTree {
 public:
-  using Projection = Projection_;
-  using Node       = KdTreeNode<Projection>;
-
   /// @brief Constructor
-  /// @param points   Point cloud
-  /// @param builder  Kd-tree builder
-  template <typename Builder = KdTreeBuilder>
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
   explicit UnsafeKdTree(const PointCloud &points,
-                        const Builder    &builder = KdTreeBuilder())
-      : points(points) {
-    if (traits::size(points) == 0) {
-      std::cerr << "warning: Empty point cloud" << std::endl;
-      return;
-    }
+                        const Builder    &builder = Builder())
+      : points(std::make_shared<PointCloud>(points)) {
+    // Initialize indices
+    indices.resize(traits::size(points));
+    std::iota(indices.begin(), indices.end(), 0);
 
+    // Build tree
     builder.build_tree(*this, points);
   }
 
-  /// @brief Find the nearest neighbor for 2D point.
-  /// @param query        Query point (2D)
-  /// @param k_indices    Index of the nearest neighbor (uninitialized if not
-  /// found)
-  /// @param k_sq_dists   Squared distance to the nearest neighbor
-  /// (uninitialized if not found)
-  /// @param setting      KNN search setting
-  /// @return             Number of found neighbors (0 or 1)
-  size_t
-  nearest_neighbor_search(const Eigen::Vector2d &query, size_t *k_indices,
-                          double           *k_sq_dists,
-                          const KnnSetting &setting = KnnSetting()) const {
-    return knn_search<1>(query, k_indices, k_sq_dists, setting);
+  /// @brief Constructor
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
+  explicit UnsafeKdTree(std::shared_ptr<const PointCloud> points,
+                        const Builder                    &builder = Builder())
+      : points(points) {
+    // Initialize indices
+    indices.resize(traits::size(*points));
+    std::iota(indices.begin(), indices.end(), 0);
+
+    // Build tree
+    builder.build_tree(*this, *points);
   }
 
-  /// @brief  Find k-nearest neighbors for 2D point. This method uses dynamic
-  /// memory allocation.
-  /// @param  query       Query point (2D)
-  /// @param  k           Number of neighbors
-  /// @param  k_indices   Indices of neighbors
-  /// @param  k_sq_dists  Squared distances to neighbors (sorted in ascending
-  /// order)
-  /// @param  setting     KNN search setting
-  /// @return             Number of found neighbors
-  size_t knn_search(const Eigen::Vector2d &query, int k, size_t *k_indices,
-                    double           *k_sq_dists,
-                    const KnnSetting &setting = KnnSetting()) const {
+  /// @brief Find k-nearest neighbors
+  /// @param query Query point
+  /// @param k Number of neighbors
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  size_t knn_search(const Eigen::Vector2d &query, size_t k, size_t *k_indices,
+                    double *k_sq_dists) const {
     KnnResult<-1> result(k_indices, k_sq_dists, k);
-    knn_search(query, root, result, setting);
+    knn_search(query, root, result);
+    result.sort();
     return result.num_found();
   }
 
-  /// @brief Find k-nearest neighbors for 2D point. This method uses fixed and
-  /// static memory allocation. Might be faster for small k.
-  /// @param query       Query point (2D)
-  /// @param k_indices   Indices of neighbors
-  /// @param k_sq_dists  Squared distances to neighbors (sorted in ascending
-  /// order)
-  /// @param setting     KNN search setting
-  /// @return            Number of found neighbors
-  template <int N>
+  /// @brief Find k-nearest neighbors with static k
+  /// @param query Query point
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  template <size_t k>
   size_t knn_search(const Eigen::Vector2d &query, size_t *k_indices,
-                    double           *k_sq_dists,
-                    const KnnSetting &setting = KnnSetting()) const {
-    KnnResult<N> result(k_indices, k_sq_dists);
-    knn_search(query, root, result, setting);
+                    double *k_sq_dists) const {
+    KnnResult<k> result(k_indices, k_sq_dists);
+    knn_search(query, root, result);
+    result.sort();
     return result.num_found();
+  }
+
+  /// @brief Find the nearest neighbor
+  /// @param query Query point
+  /// @param k_index [out] Index of the nearest neighbor
+  /// @param k_sq_dist [out] Squared distance to the nearest neighbor
+  /// @return true if a neighbor is found
+  bool nearest(const Eigen::Vector2d &query, size_t *k_index,
+               double *k_sq_dist) const {
+    return knn_search<1>(query, k_index, k_sq_dist) > 0;
   }
 
 private:
   /// @brief Find k-nearest neighbors for 2D point.
   template <typename Result>
-  bool knn_search(const Eigen::Vector2d &query, NodeIndexType node_index,
-                  Result &result, const KnnSetting &setting) const {
+  bool knn_search(const Eigen::Vector2d &query, size_t node_index,
+                  Result &result) const {
     const auto &node = nodes[node_index];
 
     // Check if it's a leaf node.
@@ -240,18 +255,18 @@ private:
       // Compare the query point with all points in the leaf node.
       for (size_t i = node.first; i < node.last; i++) {
         const double sq_dist =
-            (traits::point(points, indices[i]) - query).squaredNorm();
+            (traits::point(*points, indices[i]) - query).squaredNorm();
         result.push(indices[i], sq_dist);
       }
-      return !setting.fulfilled(result);
+      return !result.is_full();
     }
 
     const double val         = node.proj(query);
     const double diff        = val - node.thresh;
     const double cut_sq_dist = diff * diff;
 
-    NodeIndexType best_child;
-    NodeIndexType other_child;
+    size_t best_child;
+    size_t other_child;
 
     if (diff < 0.0) {
       best_child  = node.left;
@@ -262,71 +277,138 @@ private:
     }
 
     // Check the best child node first.
-    if (!knn_search(query, best_child, result, setting)) {
-      return false;
-    }
+    knn_search(query, best_child, result);
 
     // Check if the other child node needs to be tested.
-    if (result.worst_distance() > cut_sq_dist) {
-      return knn_search(query, other_child, result, setting);
+    // We need to check the other child if:
+    // 1. The result is not full yet, or
+    // 2. The distance to the splitting plane is less than the worst distance in
+    // the result
+    if (!result.is_full() || cut_sq_dist < result.worst_distance()) {
+      knn_search(query, other_child, result);
     }
 
-    return true;
+    return !result.is_full();
   }
 
 public:
-  const PointCloud   &points;  ///< Input points
-  std::vector<size_t> indices; ///< Point indices refered by nodes
-
-  NodeIndexType     root;  ///< Root node index (should be zero)
-  std::vector<Node> nodes; ///< Kd-tree nodes
+  std::shared_ptr<const PointCloud>   points;  ///< Point cloud
+  std::vector<size_t>                 indices; ///< Point indices
+  std::vector<KdTreeNode<Projection>> nodes;   ///< KdTree nodes
+  size_t                              root;    ///< Root node index
 };
 
-/// @brief "Safe" KdTree for 2D points that holds the ownership of the input
-/// points.
-template <typename PointCloud, typename Projection = AxisAlignedProjection>
-struct KdTree {
+/// @brief Safe KdTree implementation for 2D points.
+/// @note  This implementation is thread-safe.
+template <typename PointCloud, typename Projection> struct SafeKdTree {
 public:
-  using Ptr      = std::shared_ptr<KdTree<PointCloud, Projection>>;
-  using ConstPtr = std::shared_ptr<const KdTree<PointCloud, Projection>>;
+  /// @brief Constructor
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
+  explicit SafeKdTree(const PointCloud &points,
+                      const Builder    &builder = Builder())
+      : kdtree(points, builder) {}
 
-  template <typename Builder = KdTreeBuilder>
+  /// @brief Constructor
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
+  explicit SafeKdTree(std::shared_ptr<const PointCloud> points,
+                      const Builder                    &builder = Builder())
+      : kdtree(points, builder) {}
+
+  /// @brief Find k-nearest neighbors
+  /// @param query Query point
+  /// @param k Number of neighbors
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  size_t knn_search(const Eigen::Vector2d &query, size_t k, size_t *k_indices,
+                    double *k_sq_dists) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return kdtree.knn_search(query, k, k_indices, k_sq_dists);
+  }
+
+  /// @brief Find k-nearest neighbors with static k
+  /// @param query Query point
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  template <size_t k>
+  size_t knn_search(const Eigen::Vector2d &query, size_t *k_indices,
+                    double *k_sq_dists) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return kdtree.template knn_search<k>(query, k_indices, k_sq_dists);
+  }
+
+  /// @brief Find the nearest neighbor
+  /// @param query Query point
+  /// @param k_index [out] Index of the nearest neighbor
+  /// @param k_sq_dist [out] Squared distance to the nearest neighbor
+  /// @return true if a neighbor is found
+  bool nearest(const Eigen::Vector2d &query, size_t *k_index,
+               double *k_sq_dist) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return knn_search<1>(query, k_index, k_sq_dist) > 0;
+  }
+
+public:
+  UnsafeKdTree<PointCloud, Projection> kdtree; ///< KdTree implementation
+
+private:
+  mutable std::mutex mutex; ///< Mutex for thread-safety
+};
+
+/// @brief KdTree implementation for 2D points.
+/// @note  This is a wrapper around UnsafeKdTree and SafeKdTree.
+template <typename PointCloud, typename Projection> struct KdTree {
+public:
+  /// @brief Constructor
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
+  explicit KdTree(const PointCloud &points, const Builder &builder = Builder())
+      : kdtree(points, builder) {}
+
+  /// @brief Constructor
+  /// @param points Point cloud
+  template <typename Builder = KdTreeBuilder<Projection>>
   explicit KdTree(std::shared_ptr<const PointCloud> points,
                   const Builder                    &builder = Builder())
-      : points(points), kdtree(*points, builder) {}
+      : kdtree(points, builder) {}
 
-  /// @brief  Find nearest neighbor for 2D point.
-  /// @param  query       Query point (2D)
-  /// @param  k_indices   Index of the nearest neighbor
-  /// @param  k_sq_dists  Squared distance to the nearest neighbor
-  /// @param  setting     KNN search setting
-  /// @return             Number of found neighbors
-  size_t
-  nearest_neighbor_search(const Eigen::Vector2d &query, size_t *k_indices,
-                          double           *k_sq_dists,
-                          const KnnSetting &setting = KnnSetting()) const {
-    return kdtree.nearest_neighbor_search(query, k_indices, k_sq_dists,
-                                          setting);
+  /// @brief Find k-nearest neighbors
+  /// @param query Query point
+  /// @param k Number of neighbors
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  size_t knn_search(const Eigen::Vector2d &query, size_t k, size_t *k_indices,
+                    double *k_sq_dists) const {
+    return kdtree.knn_search(query, k, k_indices, k_sq_dists);
   }
 
-  /// @brief  Find k-nearest neighbors for 2D point. This method uses dynamic
-  /// memory allocation.
-  /// @param  query       Query point (2D)
-  /// @param  k           Number of neighbors
-  /// @param  k_indices   Indices of neighbors
-  /// @param  k_sq_dists  Squared distances to neighbors (sorted in ascending
-  /// order)
-  /// @param  setting     KNN search setting
-  /// @return             Number of found neighbors
-  size_t knn_search(const Eigen::Vector2d &query, size_t k, size_t *k_indices,
-                    double           *k_sq_dists,
-                    const KnnSetting &setting = KnnSetting()) const {
-    return kdtree.knn_search(query, k, k_indices, k_sq_dists, setting);
+  /// @brief Find k-nearest neighbors with static k
+  /// @param query Query point
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @return Number of found neighbors
+  template <size_t k>
+  size_t knn_search(const Eigen::Vector2d &query, size_t *k_indices,
+                    double *k_sq_dists) const {
+    return kdtree.template knn_search<k>(query, k_indices, k_sq_dists);
+  }
+
+  /// @brief Find the nearest neighbor
+  /// @param query Query point
+  /// @param k_index [out] Index of the nearest neighbor
+  /// @param k_sq_dist [out] Squared distance to the nearest neighbor
+  /// @return true if a neighbor is found
+  bool nearest(const Eigen::Vector2d &query, size_t *k_index,
+               double *k_sq_dist) const {
+    return knn_search<1>(query, k_index, k_sq_dist) > 0;
   }
 
 public:
-  const std::shared_ptr<const PointCloud>    points; ///< Points
-  const UnsafeKdTree<PointCloud, Projection> kdtree; ///< KdTree
+  UnsafeKdTree<PointCloud, Projection> kdtree; ///< KdTree implementation
 };
 
 namespace traits {

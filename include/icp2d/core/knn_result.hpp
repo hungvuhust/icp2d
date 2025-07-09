@@ -1,118 +1,140 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
-#include <iostream>
 #include <limits>
+#include <queue>
+#include <vector> // Added for std::vector
 
 namespace icp2d {
 
-/// @brief K-nearest neighbor search setting.
-struct KnnSetting {
-public:
-  /// @brief Check if the result satisfies the early termination condition.
-  template <typename Result> bool fulfilled(const Result &result) const {
-    return result.worst_distance() < epsilon;
-  }
+/// @brief K-nearest neighbor search result.
+/// @tparam N Number of neighbors (N > 0: static, N <= 0: dynamic)
+template <int N> struct KnnResult {
+  /// @brief Constructor for static k.
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  KnnResult(size_t *k_indices, double *k_sq_dists)
+      : k_indices(k_indices), k_sq_dists(k_sq_dists), k(N) {}
 
-public:
-  double epsilon = 0.0; ///< Early termination threshold
-};
+  /// @brief Constructor for dynamic k.
+  /// @param k_indices [out] Indices of k-nearest neighbors
+  /// @param k_sq_dists [out] Squared distances to k-nearest neighbors
+  /// @param k Number of neighbors
+  KnnResult(size_t *k_indices, double *k_sq_dists, size_t k)
+      : k_indices(k_indices), k_sq_dists(k_sq_dists), k(k) {}
 
-/// @brief Identity transform (alternative to std::identity in C++20).
-struct identity_transform {
-  size_t operator()(size_t i) const { return i; }
-};
-
-/// @brief K-nearest neighbor search result container.
-/// @tparam N   Number of neighbors to search. If N == -1, the number of
-/// neighbors is dynamicaly determined.
-template <int N, typename IndexTransform = identity_transform>
-struct KnnResult {
-public:
-  static constexpr size_t INVALID = std::numeric_limits<size_t>::max();
-
-  /// @brief Constructor
-  /// @param indices        Buffer to store indices (must be larger than
-  /// k=max(N, num_neighbors))
-  /// @param distances      Buffer to store distances (must be larger than
-  /// k=max(N, num_neighbors))
-  /// @param num_neighbors  Number of neighbors to search (must be -1 for static
-  /// case N > 0)
-  explicit KnnResult(
-      size_t *indices, double *distances, int num_neighbors = -1,
-      const IndexTransform &index_transform = identity_transform())
-      : index_transform(index_transform), capacity(num_neighbors),
-        num_found_neighbors(0), indices(indices), distances(distances) {
+  /// @brief Push a new neighbor.
+  /// @param index Index of the neighbor
+  /// @param sq_dist Squared distance to the neighbor
+  void push(size_t index, double sq_dist) {
     if constexpr (N > 0) {
-      if (num_neighbors >= 0) {
-        std::cerr << "warning: Specifying dynamic num_neighbors="
-                  << num_neighbors
-                  << " for a static KNN result container (N=" << N << ")"
-                  << std::endl;
-        abort();
+      // Static k
+      if (count < k) {
+        k_indices[count]  = index;
+        k_sq_dists[count] = sq_dist;
+        count++;
+
+        if (count == k) {
+          // Build max heap
+          for (size_t i = k / 2; i > 0; i--) {
+            size_t parent = i - 1;
+            sift_down(parent);
+          }
+        }
+      } else if (sq_dist < k_sq_dists[0]) {
+        // Replace root
+        k_indices[0]  = index;
+        k_sq_dists[0] = sq_dist;
+        sift_down(0);
       }
     } else {
-      if (num_neighbors <= 0) {
-        std::cerr << "error: Specifying invalid num_neighbors=" << num_neighbors
-                  << " for a dynamic KNN result container" << std::endl;
-        abort();
+      // Dynamic k
+      if (count < k) {
+        k_indices[count]  = index;
+        k_sq_dists[count] = sq_dist;
+        count++;
+
+        if (count == k) {
+          // Build max heap
+          for (size_t i = k / 2; i > 0; i--) {
+            size_t parent = i - 1;
+            sift_down(parent);
+          }
+        }
+      } else if (sq_dist < k_sq_dists[0]) {
+        // Replace root
+        k_indices[0]  = index;
+        k_sq_dists[0] = sq_dist;
+        sift_down(0);
       }
     }
-
-    std::fill(this->indices, this->indices + buffer_size(), INVALID);
-    std::fill(this->distances, this->distances + buffer_size(),
-              std::numeric_limits<double>::max());
   }
 
-  /// @brief  Buffer size (i.e., Maximum number of neighbors)
-  size_t buffer_size() const {
-    if constexpr (N > 0) {
-      return N;
-    } else {
-      return capacity;
-    }
-  }
-
-  /// @brief Number of found neighbors.
-  size_t num_found() const { return num_found_neighbors; }
-
-  /// @brief Worst distance in the result.
-  double worst_distance() const { return distances[buffer_size() - 1]; }
-
-  /// @brief  Push a pair of point index and distance to the result.
-  /// @note   The result is sorted by distance in ascending order.
-  void push(size_t index, double distance) {
-    if (distance >= worst_distance()) {
-      return;
-    }
-
+  /// @brief Get the worst distance.
+  /// @return Worst distance
+  double worst_distance() const {
     if constexpr (N == 1) {
-      indices[0]   = index_transform(index);
-      distances[0] = distance;
+      return count == 0 ? std::numeric_limits<double>::max() : k_sq_dists[0];
     } else {
-      int insert_loc = std::min<int>(num_found_neighbors, buffer_size() - 1);
-      for (; insert_loc > 0 && distance < distances[insert_loc - 1];
-           insert_loc--) {
-        indices[insert_loc]   = indices[insert_loc - 1];
-        distances[insert_loc] = distances[insert_loc - 1];
-      }
-
-      indices[insert_loc]   = index_transform(index);
-      distances[insert_loc] = distance;
+      return count < k ? std::numeric_limits<double>::max() : k_sq_dists[0];
     }
-
-    num_found_neighbors = std::min<int>(num_found_neighbors + 1, buffer_size());
   }
 
-public:
-  const IndexTransform
-      index_transform; ///< Point index transformation (e.g., local point index
-                       ///< to global point/voxel index)
-  const int capacity;  ///< Maximum number of neighbors to search
-  int       num_found_neighbors; ///< Number of found neighbors
-  size_t   *indices;             ///< Indices of neighbors
-  double   *distances;           ///< Distances to neighbors
+  /// @brief Get the number of found neighbors.
+  /// @return Number of found neighbors
+  size_t num_found() const { return count; }
+
+  /// @brief Check if the result is full.
+  /// @return True if the result is full
+  bool is_full() const { return count >= k; }
+
+  /// @brief Sort the results in ascending order of distances.
+  void sort() {
+    // Create pairs of (distance, index)
+    std::vector<std::pair<double, size_t>> pairs(count);
+    for (size_t i = 0; i < count; i++) {
+      pairs[i] = std::make_pair(k_sq_dists[i], k_indices[i]);
+    }
+
+    // Sort pairs by distance
+    std::sort(pairs.begin(), pairs.end());
+
+    // Copy back to arrays
+    for (size_t i = 0; i < count; i++) {
+      k_sq_dists[i] = pairs[i].first;
+      k_indices[i]  = pairs[i].second;
+    }
+  }
+
+private:
+  /// @brief Sift down the element at index.
+  /// @param index Index of the element
+  void sift_down(size_t index) {
+    while (true) {
+      size_t child = 2 * index + 1;
+      if (child >= count) {
+        break;
+      }
+
+      if (child + 1 < count && k_sq_dists[child + 1] > k_sq_dists[child]) {
+        child++;
+      }
+
+      if (k_sq_dists[index] >= k_sq_dists[child]) {
+        break;
+      }
+
+      std::swap(k_indices[index], k_indices[child]);
+      std::swap(k_sq_dists[index], k_sq_dists[child]);
+      index = child;
+    }
+  }
+
+private:
+  size_t *k_indices;  ///< Indices of k-nearest neighbors
+  double *k_sq_dists; ///< Squared distances to k-nearest neighbors
+  size_t  k;          ///< Number of neighbors
+  size_t  count = 0;  ///< Current number of neighbors
 };
 
 } // namespace icp2d

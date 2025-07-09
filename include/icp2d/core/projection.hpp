@@ -9,7 +9,7 @@ namespace icp2d {
 
 /// @brief Parameters to control the projection axis search.
 struct ProjectionSetting {
-  int max_scan_count =
+  size_t max_scan_count =
       128; ///< Maximum number of points to use for the axis search.
 };
 
@@ -40,7 +40,7 @@ public:
     const size_t step =
         N < setting.max_scan_count ? 1 : N / setting.max_scan_count;
     const size_t num_steps = N / step;
-    for (int i = 0; i < num_steps; i++) {
+    for (size_t i = 0; i < num_steps; i++) {
       const auto            itr = first + step * i;
       const Eigen::Vector2d pt  = traits::point(points, *itr);
       sum_pt += pt;
@@ -85,7 +85,7 @@ public:
     const size_t step =
         N < setting.max_scan_count ? 1 : N / setting.max_scan_count;
     const size_t num_steps = N / step;
-    for (int i = 0; i < num_steps; i++) {
+    for (size_t i = 0; i < num_steps; i++) {
       const auto            itr = first + step * i;
       const Eigen::Vector2d pt  = traits::point(points, *itr);
       sum_pt += pt;

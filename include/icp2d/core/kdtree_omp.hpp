@@ -7,8 +7,10 @@
 
 namespace icp2d {
 
+using NodeIndexType = size_t; // Define NodeIndexType as size_t
+
 /// @brief Kd-tree builder with OpenMP for 2D points.
-struct KdTreeBuilderOMP {
+template <typename Projection = AxisAlignedProjection> struct KdTreeBuilderOMP {
 public:
   /// @brief Constructor
   /// @param num_threads  Number of threads
@@ -54,15 +56,12 @@ public:
 
     // Create a leaf node.
     if (N <= static_cast<size_t>(max_leaf_size)) {
-      // std::sort(first, last);
       node.set_as_leaf(std::distance(global_first, first),
                        std::distance(global_first, last));
-
       return node_index;
     }
 
     // Find the best axis to split the input points.
-    using Projection = typename KdTree::Projection;
     const auto proj =
         Projection::find_axis(points, first, last, projection_setting);
     const auto median_itr = first + N / 2;
@@ -71,7 +70,7 @@ public:
     });
 
     // Create a non-leaf node.
-    node.set_as_nonleaf(proj, proj(traits::point(points, *median_itr)));
+    node.set_as_internal(proj, proj(traits::point(points, *median_itr)), 0, 0);
 
     // Create left and right child nodes.
 #pragma omp task default(shared) if (N > 512)

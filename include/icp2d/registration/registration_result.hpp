@@ -5,22 +5,20 @@
 
 namespace icp2d {
 
-/// @brief Registration result for 2D ICP
+/// @brief Kết quả của quá trình đăng ký
 struct RegistrationResult {
-  RegistrationResult(const Eigen::Isometry2d &T = Eigen::Isometry2d::Identity())
-      : T_target_source(T), converged(false), iterations(0), num_inliers(0),
-        H(Eigen::Matrix<double, 3, 3>::Zero()),
-        b(Eigen::Matrix<double, 3, 1>::Zero()), error(0.0) {}
+  /// @brief Constructor
+  /// @param T Initial transformation
+  explicit RegistrationResult(const Eigen::Isometry2d &T)
+      : T_target_source(T), converged(false), iterations(0), error(0.0) {}
 
-  Eigen::Isometry2d T_target_source; ///<  Estimated transformation
-
-  bool   converged;   ///< If the optimization converged
-  size_t iterations;  ///< Number of optimization iterations
-  size_t num_inliers; ///< Number of inliear points
-
-  Eigen::Matrix<double, 3, 3> H; ///< Final information matrix (3x3 for SE(2))
-  Eigen::Matrix<double, 3, 1> b; ///< Final information vector (3x1 for SE(2))
-  double                      error; ///< Final error
+  Eigen::Isometry2d T_target_source; ///< Phép biến đổi từ source sang target
+  bool              converged;       ///< Đã hội tụ chưa
+  int               iterations;      ///< Số lần lặp đã thực hiện
+  double            error;           ///< Giá trị error cuối cùng
+  Eigen::Matrix<double, 3, 3> H;           ///< Ma trận Hessian cuối cùng
+  Eigen::Matrix<double, 3, 1> b;           ///< Vector gradient cuối cùng
+  int                         num_inliers; ///< Số lượng điểm inlier
 };
 
 } // namespace icp2d
