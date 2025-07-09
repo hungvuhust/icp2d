@@ -17,7 +17,15 @@ include_directories(
 
 add_executable(main src/main.cpp)
 
-install(TARGETS main
+# Add test executable
+add_executable(test_kdtree test/test_kdtree.cpp)
+target_link_libraries(test_kdtree ${EIGEN3_LIBRARIES})
+
+# Enable testing
+enable_testing()
+add_test(NAME kdtree_test COMMAND test_kdtree)
+
+install(TARGETS main test_kdtree
   RUNTIME DESTINATION bin
 )
 
