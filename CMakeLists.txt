@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 find_package(Eigen3 REQUIRED)
+find_package(OpenMP REQUIRED)
 
 include_directories(
   include
@@ -21,11 +22,16 @@ add_executable(main src/main.cpp)
 add_executable(test_kdtree test/test_kdtree.cpp)
 target_link_libraries(test_kdtree ${EIGEN3_LIBRARIES})
 
+# Add OMP test executable
+add_executable(test_kdtree_omp test/test_kdtree_omp.cpp)
+target_link_libraries(test_kdtree_omp ${EIGEN3_LIBRARIES} OpenMP::OpenMP_CXX)
+
 # Enable testing
 enable_testing()
 add_test(NAME kdtree_test COMMAND test_kdtree)
+add_test(NAME kdtree_omp_test COMMAND test_kdtree_omp)
 
-install(TARGETS main test_kdtree
+install(TARGETS main test_kdtree test_kdtree_omp
   RUNTIME DESTINATION bin
 )
 
