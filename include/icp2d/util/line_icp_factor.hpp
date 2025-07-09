@@ -6,6 +6,9 @@
 #include <Eigen/Geometry>
 #include <icp2d/core/traits.hpp>
 #include <icp2d/util/lie.hpp>
+#include <limits>
+#include <memory>
+#include <vector>
 
 namespace icp2d {
 
@@ -13,14 +16,16 @@ namespace icp2d {
 /// @note  Computes the perpendicular distance from a point to a line in 2D
 struct PointToLineICPFactor {
   struct Setting {
-    double max_correspondence_distance; ///< Maximum distance for valid
-                                        ///< correspondence
-    Setting(double max_correspondence_distance = 1.0)
-        : max_correspondence_distance(max_correspondence_distance) {}
+    double weight;    ///< Weight for this factor
+    double step_size; ///< Step size adjustment coefficient
+
+    Setting(double weight = 1.0, double step_size = 0.5)
+        : weight(weight), step_size(step_size) {}
   };
 
   PointToLineICPFactor(const Setting &setting = Setting())
-      : setting(setting), target_index(std::numeric_limits<size_t>::max()),
+      : weight(setting.weight), step_size(setting.step_size),
+        target_index(std::numeric_limits<size_t>::max()),
         source_index(std::numeric_limits<size_t>::max()) {}
 
   /// @brief Linearize the point-to-line error for 2D ICP
@@ -42,67 +47,76 @@ struct PointToLineICPFactor {
             typename TargetTree, typename CorrespondenceRejector>
   bool linearize(const TargetPointCloud &target, const SourcePointCloud &source,
                  const TargetTree &target_tree, const Eigen::Isometry2d &T,
-                 size_t source_index, const CorrespondenceRejector &rejector,
+                 size_t source_idx, const CorrespondenceRejector &rejector,
                  Eigen::Matrix<double, 3, 3> *H, Eigen::Matrix<double, 3, 1> *b,
                  double *e) {
+    // Lưu source_index
+    source_index = source_idx;
+    target_index = std::numeric_limits<size_t>::max();
 
-    this->source_index = source_index;
-    this->target_index = std::numeric_limits<size_t>::max();
+    // Lấy điểm nguồn và biến đổi nó
+    const Eigen::Vector2d source_pt      = traits::point(source, source_index);
+    const Eigen::Vector2d transformed_pt = T * source_pt;
 
-    // Transform source point to target frame
-    const Eigen::Vector2d source_pt = traits::point(source, source_index);
-    const Eigen::Vector2d transed_source_pt = T * source_pt;
-
-    // Find nearest neighbor in target
+    // Tìm điểm gần nhất trong target
     size_t k_index;
     double k_sq_dist;
-    if (!target_tree.nearest(transed_source_pt, &k_index, &k_sq_dist) ||
-        rejector(target, source, T, k_index, source_index, k_sq_dist)) {
+    if (!target_tree.nearest(transformed_pt, &k_index, &k_sq_dist)) {
       return false;
     }
 
-    // Check distance threshold
-    if (std::sqrt(k_sq_dist) > setting.max_correspondence_distance) {
+    // Kiểm tra xem cặp điểm có bị loại bỏ không
+    if (rejector(target, source, T, k_index, source_index, k_sq_dist)) {
       return false;
     }
 
     target_index = k_index;
 
-    // Get target point and normal (line direction)
+    // Lấy điểm target và normal vector
     const Eigen::Vector2d target_pt     = traits::point(target, target_index);
     const Eigen::Vector2d target_normal = traits::normal(target, target_index);
 
-    // Compute point-to-line distance
-    // For 2D: distance = dot(point - line_point, line_normal)
-    const Eigen::Vector2d residual  = transed_source_pt - target_pt;
+    // Tính error vector (khoảng cách từ điểm đến đường)
+    const Eigen::Vector2d residual  = transformed_pt - target_pt;
     const double          error_val = target_normal.dot(residual);
 
-    // Jacobian computation for SE(2) transformation
-    // SE(2) parameterization: [x, y, theta]
-    // T = [R(theta) t; 0 1] where t = [x, y]
+    // Scale error based on point distance from origin
+    const double point_scale  = 1.0 / (1.0 + 0.1 * source_pt.norm());
+    const double scaled_error = point_scale * error_val;
 
-    // Source point in homogeneous coordinates
-    const Eigen::Vector2d &src   = source_pt;
-    const double           theta = atan2(T.linear()(1, 0), T.linear()(0, 0));
-    const double           cos_theta = std::cos(theta);
-    const double           sin_theta = std::sin(theta);
+    // Apply Huber kernel
+    const double huber_threshold = 0.3;
+    double       huber_weight    = 1.0;
+    if (std::abs(scaled_error) > huber_threshold) {
+      huber_weight = huber_threshold / std::abs(scaled_error);
+    }
 
-    // Jacobian of transformed point w.r.t. SE(2) parameters
-    Eigen::Matrix<double, 2, 3> J_transform;
-    J_transform << 1, 0, -sin_theta * src.x() - cos_theta * src.y(), 0, 1,
-        cos_theta * src.x() - sin_theta * src.y();
+    *e = 0.5 * weight * huber_weight * scaled_error * scaled_error;
 
-    // Jacobian of error w.r.t. transformed point
-    Eigen::Matrix<double, 1, 2> J_error;
-    J_error = target_normal.transpose();
+    // Tính Jacobian
+    // J = [dx/dθ dx/dtx dx/dty]
+    // với θ là góc xoay, tx và ty là dịch chuyển
+    Eigen::Matrix<double, 1, 3> J;
 
-    // Chain rule: J = J_error * J_transform
-    Eigen::Matrix<double, 1, 3> J = J_error * J_transform;
+    // Đạo hàm theo θ: normal^T * [-y x] với góc quay hiện tại
+    const double cos_theta = T.linear()(0, 0);
+    const double sin_theta = T.linear()(1, 0);
 
-    // Compute Hessian and gradient
-    *H = J.transpose() * J;
-    *b = J.transpose() * error_val;
-    *e = 0.5 * error_val * error_val;
+    // Scale rotation Jacobian based on point distance
+    const double rot_scale = point_scale * step_size * huber_weight;
+    J(0) =
+        rot_scale * target_normal.dot(Eigen::Vector2d(
+                        -sin_theta * source_pt.x() - cos_theta * source_pt.y(),
+                        cos_theta * source_pt.x() - sin_theta * source_pt.y()));
+
+    // Scale translation Jacobian
+    const double trans_scale = point_scale * step_size * huber_weight;
+    J(1)                     = trans_scale * target_normal.x();
+    J(2)                     = trans_scale * target_normal.y();
+
+    // Cập nhật Hessian và gradient
+    *H = weight * (J.transpose() * J);
+    *b = -weight * (J.transpose() * scaled_error);
 
     return true;
   }
@@ -122,18 +136,29 @@ struct PointToLineICPFactor {
     }
 
     // Transform source point
-    const Eigen::Vector2d source_pt = traits::point(source, source_index);
-    const Eigen::Vector2d transed_source_pt = T * source_pt;
+    const Eigen::Vector2d source_pt      = traits::point(source, source_index);
+    const Eigen::Vector2d transformed_pt = T * source_pt;
 
     // Get target point and normal
     const Eigen::Vector2d target_pt     = traits::point(target, target_index);
     const Eigen::Vector2d target_normal = traits::normal(target, target_index);
 
     // Compute point-to-line distance
-    const Eigen::Vector2d residual  = transed_source_pt - target_pt;
-    const double          error_val = target_normal.dot(residual);
+    const Eigen::Vector2d error_residual = transformed_pt - target_pt;
+    const double          error_distance = target_normal.dot(error_residual);
 
-    return 0.5 * error_val * error_val;
+    // Scale error based on point distance from origin
+    const double point_scale  = 1.0 / (1.0 + 0.1 * source_pt.norm());
+    const double scaled_error = point_scale * error_distance;
+
+    // Apply Huber kernel
+    const double huber_threshold = 0.3;
+    double       huber_weight    = 1.0;
+    if (std::abs(scaled_error) > huber_threshold) {
+      huber_weight = huber_threshold / std::abs(scaled_error);
+    }
+
+    return 0.5 * weight * huber_weight * scaled_error * scaled_error;
   }
 
   /// @brief Check if this factor represents a valid correspondence
@@ -142,34 +167,15 @@ struct PointToLineICPFactor {
     return target_index != std::numeric_limits<size_t>::max();
   }
 
-  /// @brief Get the point-to-line distance (signed)
-  /// @tparam TargetPointCloud Target point cloud type
-  /// @tparam SourcePointCloud Source point cloud type
-  /// @param target Target point cloud
-  /// @param source Source point cloud
-  /// @param T Current 2D transformation
-  /// @return Signed distance from point to line
-  template <typename TargetPointCloud, typename SourcePointCloud>
-  double signed_distance(const TargetPointCloud  &target,
-                         const SourcePointCloud  &source,
-                         const Eigen::Isometry2d &T) const {
-    if (target_index == std::numeric_limits<size_t>::max()) {
-      return 0.0;
-    }
-
-    const Eigen::Vector2d source_pt = traits::point(source, source_index);
-    const Eigen::Vector2d transed_source_pt = T * source_pt;
-    const Eigen::Vector2d target_pt     = traits::point(target, target_index);
-    const Eigen::Vector2d target_normal = traits::normal(target, target_index);
-
-    const Eigen::Vector2d residual = transed_source_pt - target_pt;
-    return target_normal.dot(residual);
-  }
+  /// @brief Get the step size
+  /// @return Step size
+  double get_step_size() const { return step_size; }
 
 public:
-  Setting setting;      ///< Factor configuration
-  size_t  target_index; ///< Index of corresponding target point
-  size_t  source_index; ///< Index of source point
+  double weight;       ///< Weight for this factor
+  double step_size;    ///< Step size adjustment coefficient
+  size_t target_index; ///< Index of corresponding target point
+  size_t source_index; ///< Index of source point
 };
 
 } // namespace icp2d

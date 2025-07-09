@@ -3,10 +3,10 @@
 echo "Building and running KDTree tests..."
 echo "===================================="
 
-# Delete build directory if it exists
-if [ -d "build" ]; then
-    rm -rf build
-fi
+# # Delete build directory if it exists
+# if [ -d "build" ]; then
+#     rm -rf build
+# fi
 
 # Create build directory if it doesn't exist
 if [ ! -d "build" ]; then
@@ -25,17 +25,17 @@ cmake --build . --config Release
 
 # Check if test executables exist
 if [ ! -f "test_kdtree" ]; then
-    echo "❌ Error: test_kdtree executable not found!"
+    echo " Error: test_kdtree executable not found!"
     exit 1
 fi
 
 if [ ! -f "test_kdtree_omp" ]; then
-    echo "❌ Error: test_kdtree_omp executable not found!"
+    echo " Error: test_kdtree_omp executable not found!"
     exit 1
 fi
 
 if [ ! -f "test_basic_icp" ]; then
-    echo "❌ Error: test_basic_icp executable not found!"
+    echo " Error: test_basic_icp executable not found!"
     exit 1
 fi
 
@@ -48,7 +48,7 @@ echo "=================================="
 # Check the result
 if [ $? -ne 0 ]; then
     echo ""
-    echo "❌ Sequential tests failed!"
+    echo "Sequential tests failed!"
     exit 1
 fi
 
@@ -61,7 +61,7 @@ echo "=============================="
 # Check the result
 if [ $? -ne 0 ]; then
     echo ""
-    echo "❌ OpenMP tests failed!"
+    echo " OpenMP tests failed!"
     exit 1
 fi
 
@@ -74,12 +74,12 @@ echo "========================="
 # Check the result
 if [ $? -eq 0 ]; then
     echo ""
-    echo "🎉 All tests completed successfully!"
-    echo "✅ KDTree (Sequential): PASSED"
-    echo "✅ KDTree (OpenMP): PASSED" 
-    echo "✅ Basic ICP: PASSED"
+    echo " All tests completed successfully!"
+    echo " KDTree (Sequential): PASSED"
+    echo " KDTree (OpenMP): PASSED" 
+    echo " Basic ICP: PASSED"
 else
     echo ""
-    echo "❌ Basic ICP tests failed!"
+    echo " Basic ICP tests failed!"
     exit 1
 fi 

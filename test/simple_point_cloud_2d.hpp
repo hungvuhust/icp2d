@@ -22,7 +22,7 @@ public:
 namespace icp2d {
 namespace traits {
 
-template <> struct Traits<SimplePointCloud2D> {
+template <> struct PointCloudTraits<SimplePointCloud2D> {
   using PointType = Eigen::Vector2d;
 
   static size_t size(const SimplePointCloud2D &cloud) {

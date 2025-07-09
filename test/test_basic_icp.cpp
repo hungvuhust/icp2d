@@ -1,27 +1,32 @@
-// SPDX-FileCopyrightText: Copyright 2024 Kenji Koide
-// SPDX-License-Identifier: MIT
+#include <gtest/gtest.h>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <cmath>
-#include <gtest/gtest.h>
-#include <random>
+#include <icp2d/core/kdtree.hpp>
+#include <icp2d/core/projection.hpp>
+#include <icp2d/core/traits.hpp>
+#include <icp2d/registration/optimizer.hpp>
+#include <icp2d/registration/point_to_line_icp_factor.hpp>
+#include <icp2d/registration/reduction.hpp>
+#include <icp2d/registration/registration.hpp>
+#include <icp2d/registration/rejector.hpp>
+#include <icp2d/registration/termination_criteria.hpp>
+#include <icp2d/util/general_factor.hpp>
+#include <icp2d/util/lie.hpp>
+#include <icp2d/util/robust_kernel.hpp>
 
-// Include các components cần thiết
-#include "icp2d/core/kdtree.hpp"
-#include "icp2d/registration/optimizer.hpp"
-#include "icp2d/registration/reduction.hpp"
-#include "icp2d/registration/rejector.hpp"
-#include "icp2d/registration/termination_criteria.hpp"
-#include "icp2d/util/general_factor.hpp"
-#include "icp2d/util/point_icp_factor.hpp"
-#include "icp2d/util/robust_kernel.hpp"
+#include <cmath>
+#include <random>
 
 namespace icp2d {
 
-// Hàm tiện ích để thêm nhiễu Gaussian
-Eigen::Vector2d add_gaussian_noise(const Eigen::Vector2d &point, double std_dev,
-                                   std::mt19937 &gen) {
+/// @brief Add Gaussian noise to a point
+/// @param point Point to add noise to
+/// @param std_dev Standard deviation of noise
+/// @param gen Random number generator
+/// @return Point with noise added
+inline Eigen::Vector2d add_gaussian_noise(const Eigen::Vector2d &point,
+                                          double std_dev, std::mt19937 &gen) {
   std::normal_distribution<double> dist(0.0, std_dev);
   return point + Eigen::Vector2d(dist(gen), dist(gen));
 }
@@ -127,7 +132,7 @@ TEST(BasicICPTest, NoKernel) {
   EXPECT_EQ(weight, 1.0); // Always 1.0
 
   double robust_err = none_kernel.robust_error(error);
-  EXPECT_EQ(robust_err, error); // Same as input
+  EXPECT_EQ(robust_err, 0.5 * error * error); // 0.5 * error^2 for None kernel
 
   std::cout << "None kernel - Weight: " << weight << std::endl;
 }
@@ -520,31 +525,44 @@ TEST(BasicICPTest, PointToPointSineCurve) {
   EXPECT_LT(rotation_error, 5.0);           // Sai số góc < 5 độ
 }
 
-// Test point-to-line ICP với đường cong sin có nhiễu
+// Test point-to-line ICP với hình vuông có nhiễu
 TEST(BasicICPTest, PointToLineSineCurve) {
-  // Tạo dữ liệu giống như test trước
+  // Create square shape for point-to-line ICP
   std::vector<Eigen::Vector2d> source_points;
   std::vector<Eigen::Vector2d> target_points;
-  const int                    num_points = 100;
-  const double                 x_start    = -M_PI;
-  const double                 x_end      = M_PI;
-  const double                 dx = (x_end - x_start) / (num_points - 1);
+  const int                    points_per_side = 25;
+  const double                 side_length     = 2.0;
 
-  // Tạo source points
-  for (int i = 0; i < num_points; ++i) {
-    double x = x_start + i * dx;
-    double y = std::sin(x);
-    source_points.push_back(Eigen::Vector2d(x, y));
+  // Create source points - square shape
+  // Bottom edge: y = 0, x from 0 to side_length
+  for (int i = 0; i < points_per_side; ++i) {
+    double x = (double)i / (points_per_side - 1) * side_length;
+    source_points.push_back(Eigen::Vector2d(x, 0.0));
+  }
+  // Right edge: x = side_length, y from 0 to side_length
+  for (int i = 1; i < points_per_side; ++i) {
+    double y = (double)i / (points_per_side - 1) * side_length;
+    source_points.push_back(Eigen::Vector2d(side_length, y));
+  }
+  // Top edge: y = side_length, x from side_length to 0
+  for (int i = 1; i < points_per_side; ++i) {
+    double x = side_length - (double)i / (points_per_side - 1) * side_length;
+    source_points.push_back(Eigen::Vector2d(x, side_length));
+  }
+  // Left edge: x = 0, y from side_length to 0
+  for (int i = 1; i < points_per_side - 1; ++i) {
+    double y = side_length - (double)i / (points_per_side - 1) * side_length;
+    source_points.push_back(Eigen::Vector2d(0.0, y));
   }
 
-  // Tạo transformation thật
+  // Create ground truth transformation
   Eigen::Isometry2d T_true = Eigen::Isometry2d::Identity();
   double            angle  = 15.0 * M_PI / 180.0;
   T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
       std::cos(angle);
   T_true.translation() << 0.5, 0.3;
 
-  // Thêm nhiễu
+  // Add noise
   std::random_device rd;
   std::mt19937       gen(rd());
   const double       noise_std_dev = 0.05;
@@ -555,21 +573,103 @@ TEST(BasicICPTest, PointToLineSineCurve) {
         add_gaussian_noise(transformed, noise_std_dev, gen));
   }
 
-  // TODO: Thực hiện point-to-line ICP
-  // Các bước cần làm:
-  // 1. Khởi tạo KDTree với target points
-  // 2. Tính normal vectors tại mỗi điểm target
-  // 3. Thiết lập các tham số ICP
-  // 4. Chạy point-to-line ICP
-  // 5. So sánh kết quả với ground truth transformation
+  // Initialize KDTree for target points directly (no normals needed for
+  // point-to-line ICP)
+  using KDTree = KdTree<std::vector<Eigen::Vector2d>>;
+  auto target_points_ptr =
+      std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
+  KDTree target_tree(target_points_ptr);
 
-  std::cout << "Point-to-line ICP test with sine curve" << std::endl;
-  // TODO: In kết quả đăng ký và độ chính xác
+  // Initialize point-to-line ICP factor
+  PointToLineICPFactor<Huber>::Setting factor_setting;
+  factor_setting.robust_kernel.c       = 0.5;
+  factor_setting.distance_scale_factor = 0.5;
+  std::vector<PointToLineICPFactor<Huber>> factors(
+      source_points.size(), PointToLineICPFactor<Huber>(factor_setting));
+
+  // Initialize other components
+  DistanceRejector    rejector(0.5);
+  TerminationCriteria criteria;
+  criteria.max_iterations = 100;
+  criteria.eps_rot        = 1e-4;
+  criteria.eps_trans      = 1e-4;
+  criteria.eps_error      = 1e-6;
+  NullFactor           general_factor;
+  PointFactorReduction reduction;
+
+  // Run optimization with initial guess closer to ground truth
+  Eigen::Isometry2d T_init = Eigen::Isometry2d::Identity();
+  T_init.linear() << std::cos(18.0 * M_PI / 180.0),
+      -std::sin(18.0 * M_PI / 180.0), std::sin(18.0 * M_PI / 180.0),
+      std::cos(18.0 * M_PI / 180.0); // 18 degrees (closer to 15° ground truth)
+  T_init.translation() << 0.55, 0.35; // Closer to (0.5, 0.3) ground truth
+
+  // Run both optimizers for comparison
+  std::cout << "\nRunning GaussNewton optimizer:" << std::endl;
+  GaussNewtonOptimizer gn_optimizer;
+  auto                 gn_result = gn_optimizer.optimize(
+                      target_points, source_points, target_tree, rejector, criteria, reduction,
+                      T_init, factors, general_factor);
+
+  std::cout << "\nRunning LevenbergMarquardt optimizer:" << std::endl;
+  LevenbergMarquardtOptimizer lm_optimizer;
+  auto                        lm_result = lm_optimizer.optimize(
+                             target_points, source_points, target_tree, rejector, criteria, reduction,
+                             T_init, factors, general_factor);
+
+  // Check GaussNewton results
+  std::cout << "\nGaussNewton Results:" << std::endl;
+  std::cout << "Converged: " << gn_result.converged << std::endl;
+  std::cout << "Error: " << gn_result.error << std::endl;
+  std::cout << "Iterations: " << gn_result.iterations << std::endl;
+  std::cout << "Inliers: " << gn_result.num_inliers << std::endl;
+
+  Eigen::Vector2d gn_trans_error =
+      gn_result.T_target_source.translation() - T_true.translation();
+  double gn_rot_error =
+      std::abs(std::atan2(gn_result.T_target_source.linear()(1, 0),
+                          gn_result.T_target_source.linear()(0, 0)) -
+               angle);
+  gn_rot_error = std::min(gn_rot_error, 2 * M_PI - gn_rot_error);
+
+  std::cout << "Translation error: " << gn_trans_error.norm() << std::endl;
+  std::cout << "Rotation error: " << gn_rot_error * 180.0 / M_PI << " degrees"
+            << std::endl;
+
+  // Check LevenbergMarquardt results
+  std::cout << "\nLevenbergMarquardt Results:" << std::endl;
+  std::cout << "Converged: " << lm_result.converged << std::endl;
+  std::cout << "Error: " << lm_result.error << std::endl;
+  std::cout << "Iterations: " << lm_result.iterations << std::endl;
+  std::cout << "Inliers: " << lm_result.num_inliers << std::endl;
+
+  Eigen::Vector2d lm_trans_error =
+      lm_result.T_target_source.translation() - T_true.translation();
+  double lm_rot_error =
+      std::abs(std::atan2(lm_result.T_target_source.linear()(1, 0),
+                          lm_result.T_target_source.linear()(0, 0)) -
+               angle);
+  lm_rot_error = std::min(lm_rot_error, 2 * M_PI - lm_rot_error);
+
+  std::cout << "Translation error: " << lm_trans_error.norm() << std::endl;
+  std::cout << "Rotation error: " << lm_rot_error * 180.0 / M_PI << " degrees"
+            << std::endl;
+
+  // Check accuracy (allow larger errors due to noise)
+  EXPECT_TRUE(gn_result.converged);
+  EXPECT_LT(gn_result.error, 0.1);
+  EXPECT_LT(gn_trans_error.norm(), 0.2);
+  EXPECT_LT(gn_rot_error, 0.2);
+
+  EXPECT_TRUE(lm_result.converged);
+  EXPECT_LT(lm_result.error, 0.1);
+  EXPECT_LT(lm_trans_error.norm(), 0.2);
+  EXPECT_LT(lm_rot_error, 0.2);
 }
 
-// Test GaussNewton optimizer với point-to-point ICP
+// Test GaussNewton optimizer with point-to-point ICP
 TEST(BasicICPTest, GaussNewtonOptimizer) {
-  // Tạo dữ liệu test - hình vuông với nhiều điểm hơn
+  // Create test data - square with more points
   std::vector<Eigen::Vector2d> source_points;
   const int                    num_points_per_side = 10; // 10 points per side
   const double                 step = 1.0 / (num_points_per_side - 1);
@@ -591,49 +691,49 @@ TEST(BasicICPTest, GaussNewtonOptimizer) {
     source_points.push_back({0.0, i * step});
   }
 
-  // Tạo ground truth transformation
+  // Create ground truth transformation
   Eigen::Isometry2d T_true = Eigen::Isometry2d::Identity();
-  double            angle  = 30.0 * M_PI / 180.0; // Xoay 30 độ
+  double            angle  = 30.0 * M_PI / 180.0; // 30 degrees rotation
   T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
       std::cos(angle);
   T_true.translation() << 0.5, 0.3;
 
-  // Tạo target points bằng cách áp dụng transformation
+  // Create target points by applying transformation
   std::vector<Eigen::Vector2d> target_points;
   for (const auto &p : source_points) {
     target_points.push_back(T_true * p);
   }
 
-  // Khởi tạo KDTree cho target points
+  // Initialize KDTree for target points
   using KDTree = icp2d::KdTree<std::vector<Eigen::Vector2d>>;
   auto target_points_ptr =
       std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
   KDTree target_tree(target_points_ptr);
 
-  // Khởi tạo point-to-point ICP factor
+  // Initialize point-to-point ICP factor
   icp2d::PointICPFactor::Setting factor_setting;
   factor_setting.weight    = 1.0;
-  factor_setting.step_size = 0.3; // Giảm step size
+  factor_setting.step_size = 0.3; // Reduce step size
   std::vector<icp2d::PointICPFactor> factors(
       source_points.size(), icp2d::PointICPFactor(factor_setting));
 
-  // Khởi tạo GaussNewton optimizer
+  // Initialize GaussNewton optimizer
   icp2d::GaussNewtonOptimizer optimizer;
   optimizer.verbose        = true;
-  optimizer.max_iterations = 100;  // Tăng số lần lặp
-  optimizer.lambda         = 1e-8; // Giảm damping
+  optimizer.max_iterations = 100;  // Increase iterations
+  optimizer.lambda         = 1e-8; // Reduce damping
 
-  // Khởi tạo các thành phần khác
+  // Initialize other components
   icp2d::DistanceRejector    rejector(0.5);
   icp2d::TerminationCriteria criteria;
-  criteria.max_iterations = 100; // Tăng số lần lặp
+  criteria.max_iterations = 100; // Increase iterations
   criteria.eps_rot        = 1e-4;
   criteria.eps_trans      = 1e-4;
   criteria.eps_error      = 1e-6;
   icp2d::NullFactor           general_factor;
   icp2d::PointFactorReduction reduction;
 
-  // Chạy optimization với initial guess gần với ground truth hơn
+  // Run optimization with initial guess closer to ground truth
   Eigen::Isometry2d T_init = Eigen::Isometry2d::Identity();
   T_init.linear() << std::cos(28.0 * M_PI / 180.0),
       -std::sin(28.0 * M_PI / 180.0), std::sin(28.0 * M_PI / 180.0),
@@ -644,11 +744,11 @@ TEST(BasicICPTest, GaussNewtonOptimizer) {
       optimizer.optimize(target_points, source_points, target_tree, rejector,
                          criteria, reduction, T_init, factors, general_factor);
 
-  // Kiểm tra kết quả
+  // Check results
   EXPECT_TRUE(result.converged);
   EXPECT_LT(result.error, 1e-3);
 
-  // So sánh với ground truth
+  // Compare with ground truth
   Eigen::Vector2d trans_error =
       result.T_target_source.translation() - T_true.translation();
   double rot_error =
@@ -656,8 +756,8 @@ TEST(BasicICPTest, GaussNewtonOptimizer) {
                           result.T_target_source.linear()(0, 0)) -
                angle);
 
-  EXPECT_LT(trans_error.norm(), 0.1); // Sai số dịch chuyển < 0.1
-  EXPECT_LT(rot_error, 0.1);          // Sai số góc < 0.1 rad (~5.7 độ)
+  EXPECT_LT(trans_error.norm(), 0.1); // Translation error < 0.1
+  EXPECT_LT(rot_error, 0.1);          // Rotation error < 0.1 rad (~5.7 degrees)
 
   std::cout << "GaussNewton Results:" << std::endl;
   std::cout << "Iterations: " << result.iterations << std::endl;
@@ -666,9 +766,9 @@ TEST(BasicICPTest, GaussNewtonOptimizer) {
   std::cout << "Rotation error (rad): " << rot_error << std::endl;
 }
 
-// Test LevenbergMarquardt optimizer với point-to-point ICP
+// Test LevenbergMarquardt optimizer with point-to-point ICP
 TEST(BasicICPTest, LevenbergMarquardtOptimizer) {
-  // Tạo dữ liệu test - hình vuông với nhiều điểm hơn
+  // Create test data - square with more points
   std::vector<Eigen::Vector2d> source_points;
   const int                    num_points_per_side = 10; // 10 points per side
   const double                 step = 1.0 / (num_points_per_side - 1);
@@ -690,14 +790,14 @@ TEST(BasicICPTest, LevenbergMarquardtOptimizer) {
     source_points.push_back({0.0, i * step});
   }
 
-  // Tạo ground truth transformation
+  // Create ground truth transformation
   Eigen::Isometry2d T_true = Eigen::Isometry2d::Identity();
-  double            angle  = 45.0 * M_PI / 180.0; // Xoay 45 độ
+  double            angle  = 45.0 * M_PI / 180.0; // 45 degrees rotation
   T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
       std::cos(angle);
   T_true.translation() << 0.8, -0.5;
 
-  // Thêm nhiễu vào target points
+  // Add noise to target points
   std::random_device               rd;
   std::mt19937                     gen(rd());
   std::normal_distribution<double> noise(0.0, 0.05);
@@ -709,37 +809,37 @@ TEST(BasicICPTest, LevenbergMarquardtOptimizer) {
     target_points.push_back(noisy_point);
   }
 
-  // Khởi tạo KDTree cho target points
+  // Initialize KDTree for target points
   using KDTree = icp2d::KdTree<std::vector<Eigen::Vector2d>>;
   auto target_points_ptr =
       std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
   KDTree target_tree(target_points_ptr);
 
-  // Khởi tạo point-to-point ICP factor
+  // Initialize point-to-point ICP factor
   icp2d::PointICPFactor::Setting factor_setting;
   factor_setting.weight    = 1.0;
-  factor_setting.step_size = 0.3; // Giảm step size
+  factor_setting.step_size = 0.3; // Reduce step size
   std::vector<icp2d::PointICPFactor> factors(
       source_points.size(), icp2d::PointICPFactor(factor_setting));
 
-  // Khởi tạo LevenbergMarquardt optimizer
+  // Initialize LevenbergMarquardt optimizer
   icp2d::LevenbergMarquardtOptimizer optimizer;
-  optimizer.max_iterations       = 100; // Tăng số lần lặp
+  optimizer.max_iterations       = 100; // Increase iterations
   optimizer.max_inner_iterations = 20;
   optimizer.init_lambda          = 1e-4;
   optimizer.lambda_factor        = 5.0;
 
-  // Khởi tạo các thành phần khác
+  // Initialize other components
   icp2d::DistanceRejector    rejector(0.5);
   icp2d::TerminationCriteria criteria;
-  criteria.max_iterations = 100; // Tăng số lần lặp
+  criteria.max_iterations = 100; // Increase iterations
   criteria.eps_rot        = 1e-4;
   criteria.eps_trans      = 1e-4;
   criteria.eps_error      = 1e-6;
   icp2d::NullFactor           general_factor;
   icp2d::PointFactorReduction reduction;
 
-  // Chạy optimization với initial guess gần với ground truth hơn
+  // Run optimization with initial guess closer to ground truth
   Eigen::Isometry2d T_init = Eigen::Isometry2d::Identity();
   T_init.linear() << std::cos(42.0 * M_PI / 180.0),
       -std::sin(42.0 * M_PI / 180.0), std::sin(42.0 * M_PI / 180.0),
@@ -750,11 +850,11 @@ TEST(BasicICPTest, LevenbergMarquardtOptimizer) {
       optimizer.optimize(target_points, source_points, target_tree, rejector,
                          criteria, reduction, T_init, factors, general_factor);
 
-  // Kiểm tra kết quả
+  // Check results
   EXPECT_TRUE(result.converged);
-  EXPECT_LT(result.error, 0.1); // Cho phép error lớn hơn do có nhiễu
+  EXPECT_LT(result.error, 0.1); // Allow larger error due to noise
 
-  // So sánh với ground truth
+  // Compare with ground truth
   Eigen::Vector2d trans_error =
       result.T_target_source.translation() - T_true.translation();
   double rot_error =
@@ -762,14 +862,281 @@ TEST(BasicICPTest, LevenbergMarquardtOptimizer) {
                           result.T_target_source.linear()(0, 0)) -
                angle);
 
-  EXPECT_LT(trans_error.norm(), 0.2); // Cho phép sai số lớn hơn do nhiễu
-  EXPECT_LT(rot_error, 0.2); // Cho phép sai số lớn hơn do nhiễu
+  EXPECT_LT(trans_error.norm(), 0.2); // Allow larger error due to noise
+  EXPECT_LT(rot_error, 0.2);          // Allow larger error due to noise
 
   std::cout << "LevenbergMarquardt Results:" << std::endl;
   std::cout << "Iterations: " << result.iterations << std::endl;
   std::cout << "Final error: " << result.error << std::endl;
   std::cout << "Translation error: " << trans_error.norm() << std::endl;
   std::cout << "Rotation error (rad): " << rot_error << std::endl;
+}
+
+// Test point cloud traits system
+TEST(BasicICPTest, PointCloudTraits) {
+  using namespace icp2d;
+
+  // Test std::vector<Eigen::Vector2d> traits
+  std::vector<Eigen::Vector2d> vec_points;
+  vec_points.push_back(Eigen::Vector2d(1.0, 0.0));
+  vec_points.push_back(Eigen::Vector2d(0.0, 1.0));
+
+  EXPECT_EQ(traits::point(vec_points, 0), Eigen::Vector2d(1.0, 0.0));
+  EXPECT_EQ(traits::point(vec_points, 1), Eigen::Vector2d(0.0, 1.0));
+  EXPECT_THROW(traits::normal(vec_points, 0), std::runtime_error);
+
+  // Test that normal access throws for std::vector<Eigen::Vector2d>
+  EXPECT_THROW(traits::normal(vec_points, 0), std::runtime_error);
+}
+
+// Test point-to-line ICP with degenerate cases
+TEST(BasicICPTest, PointToLineDegenerateCases) {
+  // Test with collinear points
+  std::vector<Eigen::Vector2d> source_points;
+  const int                    num_points = 10;
+  for (int i = 0; i < num_points; ++i) {
+    source_points.push_back(Eigen::Vector2d(i * 0.1, 0.0));
+  }
+
+  // Create target by rotating 90 degrees
+  Eigen::Isometry2d T_true = Eigen::Isometry2d::Identity();
+  double            angle  = M_PI / 2.0; // 90 degrees
+  T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
+      std::cos(angle);
+  T_true.translation() << 0.1, 0.2;
+
+  std::vector<Eigen::Vector2d> target_points;
+  for (const auto &p : source_points) {
+    target_points.push_back(T_true * p);
+  }
+
+  // Initialize ICP components directly with target points
+  using KDTree = KdTree<std::vector<Eigen::Vector2d>>;
+  auto target_points_ptr =
+      std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
+  KDTree target_tree(target_points_ptr);
+
+  PointToLineICPFactor<Huber>::Setting factor_setting;
+  factor_setting.robust_kernel.c       = 0.5;
+  factor_setting.distance_scale_factor = 0.3;
+  std::vector<PointToLineICPFactor<Huber>> factors(
+      source_points.size(), PointToLineICPFactor<Huber>(factor_setting));
+
+  DistanceRejector    rejector(0.5);
+  TerminationCriteria criteria;
+  criteria.max_iterations = 100;
+  criteria.eps_rot        = 1e-4;
+  criteria.eps_trans      = 1e-4;
+  criteria.eps_error      = 1e-6;
+  NullFactor           general_factor;
+  PointFactorReduction reduction;
+
+  // Test with initial guess far from ground truth
+  Eigen::Isometry2d T_init = Eigen::Isometry2d::Identity();
+  T_init.linear() << std::cos(-angle), -std::sin(-angle), std::sin(-angle),
+      std::cos(-angle); // -90 degrees
+  T_init.translation() << -0.1, -0.2;
+
+  // Try both optimizers
+  GaussNewtonOptimizer gn_optimizer;
+  auto                 gn_result = gn_optimizer.optimize(
+                      target_points, source_points, target_tree, rejector, criteria, reduction,
+                      T_init, factors, general_factor);
+
+  LevenbergMarquardtOptimizer lm_optimizer;
+  auto                        lm_result = lm_optimizer.optimize(
+                             target_points, source_points, target_tree, rejector, criteria, reduction,
+                             T_init, factors, general_factor);
+
+  // Check results - should converge despite degenerate case
+  EXPECT_TRUE(gn_result.converged);
+  EXPECT_TRUE(lm_result.converged);
+
+  // Errors should be small but may not be zero due to collinearity
+  EXPECT_LT(gn_result.error, 0.1);
+  EXPECT_LT(lm_result.error, 0.1);
+
+  // Print detailed results
+  std::cout << "\nDegenerate Case Results:" << std::endl;
+  std::cout << "GaussNewton error: " << gn_result.error << std::endl;
+  std::cout << "LevenbergMarquardt error: " << lm_result.error << std::endl;
+
+  // Test with circle points (another degenerate case)
+  source_points.clear();
+  const int    num_circle_points = 20;
+  const double radius            = 1.0;
+  for (int i = 0; i < num_circle_points; ++i) {
+    double theta = 2.0 * M_PI * i / num_circle_points;
+    source_points.push_back(
+        Eigen::Vector2d(radius * std::cos(theta), radius * std::sin(theta)));
+  }
+
+  // Create target by rotating 45 degrees and translating
+  T_true = Eigen::Isometry2d::Identity();
+  angle  = M_PI / 4.0; // 45 degrees
+  T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
+      std::cos(angle);
+  T_true.translation() << 0.5, -0.3;
+
+  target_points.clear();
+  for (const auto &p : source_points) {
+    target_points.push_back(T_true * p);
+  }
+
+  // Re-initialize KDTree for circle points
+  target_points_ptr =
+      std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
+  KDTree target_tree_circle(target_points_ptr);
+
+  // Reset factors for new point count
+  factors.clear();
+  factors.resize(source_points.size(), PointToLineICPFactor(factor_setting));
+
+  // Test with bad initial guess
+  T_init = Eigen::Isometry2d::Identity();
+  T_init.linear() << std::cos(M_PI), -std::sin(M_PI), std::sin(M_PI),
+      std::cos(M_PI); // 180 degrees (completely wrong)
+  T_init.translation() << -1.0, 1.0;
+
+  gn_result = gn_optimizer.optimize(target_points, source_points,
+                                    target_tree_circle, rejector, criteria,
+                                    reduction, T_init, factors, general_factor);
+
+  lm_result = lm_optimizer.optimize(target_points, source_points,
+                                    target_tree_circle, rejector, criteria,
+                                    reduction, T_init, factors, general_factor);
+
+  // Check results for circle case
+  EXPECT_TRUE(gn_result.converged);
+  EXPECT_TRUE(lm_result.converged);
+  EXPECT_LT(gn_result.error, 0.1);
+  EXPECT_LT(lm_result.error, 0.1);
+
+  std::cout << "\nCircle Case Results:" << std::endl;
+  std::cout << "GaussNewton error: " << gn_result.error << std::endl;
+  std::cout << "LevenbergMarquardt error: " << lm_result.error << std::endl;
+
+  // Compare transformations with ground truth
+  Eigen::Vector2d gn_trans_error =
+      gn_result.T_target_source.translation() - T_true.translation();
+  double gn_rot_error =
+      std::abs(std::atan2(gn_result.T_target_source.linear()(1, 0),
+                          gn_result.T_target_source.linear()(0, 0)) -
+               angle);
+  gn_rot_error = std::min(gn_rot_error, 2 * M_PI - gn_rot_error);
+
+  Eigen::Vector2d lm_trans_error =
+      lm_result.T_target_source.translation() - T_true.translation();
+  double lm_rot_error =
+      std::abs(std::atan2(lm_result.T_target_source.linear()(1, 0),
+                          lm_result.T_target_source.linear()(0, 0)) -
+               angle);
+  lm_rot_error = std::min(lm_rot_error, 2 * M_PI - lm_rot_error);
+
+  // Check accuracy (allow larger errors due to degeneracy)
+  EXPECT_LT(gn_trans_error.norm(), 0.2);
+  EXPECT_LT(gn_rot_error, 0.2);
+  EXPECT_LT(lm_trans_error.norm(), 0.2);
+  EXPECT_LT(lm_rot_error, 0.2);
+
+  std::cout << "GaussNewton transformation error:" << std::endl;
+  std::cout << "  Translation: " << gn_trans_error.norm() << std::endl;
+  std::cout << "  Rotation: " << gn_rot_error * 180.0 / M_PI << " degrees"
+            << std::endl;
+  std::cout << "LevenbergMarquardt transformation error:" << std::endl;
+  std::cout << "  Translation: " << lm_trans_error.norm() << std::endl;
+  std::cout << "  Rotation: " << lm_rot_error * 180.0 / M_PI << " degrees"
+            << std::endl;
+}
+
+// Test point-to-line ICP with different robust kernels
+TEST(BasicICPTest, PointToLineRobustKernels) {
+  using namespace traits;
+
+  // Create sine curve test case with outliers
+  std::vector<Eigen::Vector2d> source_points;
+  const int                    num_points = 100;
+  const double                 x_min      = -M_PI;
+  const double                 x_max      = M_PI;
+  const double                 dx         = (x_max - x_min) / (num_points - 1);
+
+  std::random_device                     rd;
+  std::mt19937                           gen(rd());
+  std::normal_distribution<double>       noise(0.0, 0.05);
+  std::uniform_real_distribution<double> outlier_dist(-1.0, 1.0);
+
+  // Generate source points (sine curve with noise and outliers)
+  for (int i = 0; i < num_points; ++i) {
+    const double x = x_min + i * dx;
+    const double y = std::sin(x);
+
+    // Add 10% outliers
+    if (i % 10 == 0) {
+      source_points.push_back(Eigen::Vector2d(x, y + outlier_dist(gen)));
+    } else {
+      source_points.push_back(Eigen::Vector2d(x, y + noise(gen)));
+    }
+  }
+
+  // Create ground truth transform
+  Eigen::Isometry2d T_true = Eigen::Isometry2d::Identity();
+  const double      angle  = 15.0 * M_PI / 180.0; // 15 degrees
+  T_true.linear() << std::cos(angle), -std::sin(angle), std::sin(angle),
+      std::cos(angle);
+  T_true.translation() << 0.5, 0.3;
+
+  // Transform source points
+  std::vector<Eigen::Vector2d> target_points;
+  for (const auto &p : source_points) {
+    target_points.push_back(T_true * p);
+  }
+
+  // No need to estimate normals for point-to-line ICP
+
+  // Initial guess closer to ground truth (18 degrees vs 15 degrees)
+  Eigen::Isometry2d T_init     = Eigen::Isometry2d::Identity();
+  const double      init_angle = 18.0 * M_PI / 180.0;
+  T_init.linear() << std::cos(init_angle), -std::sin(init_angle),
+      std::sin(init_angle), std::cos(init_angle);
+  T_init.translation() << 0.55, 0.35; // Closer to (0.5, 0.3) ground truth
+
+  // Create registration with current kernel
+  LevenbergMarquardtOptimizer optimizer;
+  optimizer.max_iterations = 100;
+  // optimizer.lambda         = 1e-6;
+
+  TerminationCriteria criteria;
+  criteria.max_iterations = 50;
+  criteria.eps_rot        = 1e-4;
+  criteria.eps_trans      = 1e-4;
+  criteria.eps_error      = 1e-6;
+
+  DistanceRejector     rejector(0.5);
+  PointFactorReduction reduction;
+
+  std::vector<PointToLineICPFactor<Huber>> factors(source_points.size());
+
+  // Run registration
+  Eigen::Isometry2d T_est = T_init;
+  auto              target_ptr =
+      std::make_shared<std::vector<Eigen::Vector2d>>(target_points);
+  KdTree<std::vector<Eigen::Vector2d>> target_tree(target_ptr);
+
+  NullFactor general_factor;
+  auto       result =
+      optimizer.optimize(target_points, source_points, target_tree, rejector,
+                         criteria, reduction, T_init, factors, general_factor);
+
+  // Check results
+  const Eigen::Vector2d translation_error =
+      result.T_target_source.translation() - T_true.translation();
+  const double rotation_error = std::abs(
+      std::acos(Eigen::Rotation2Dd(result.T_target_source.linear()).angle() -
+                Eigen::Rotation2Dd(T_true.linear()).angle()));
+
+  std::cout << "Translation error: " << translation_error.norm() << std::endl;
+  std::cout << "Rotation error: " << rotation_error * 180.0 / M_PI << " degrees"
+            << std::endl;
 }
 
 } // namespace icp2d

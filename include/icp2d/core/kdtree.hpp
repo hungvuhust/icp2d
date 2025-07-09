@@ -411,40 +411,4 @@ public:
   UnsafeKdTree<PointCloud, Projection> kdtree; ///< KdTree implementation
 };
 
-namespace traits {
-
-template <typename PointCloud, typename Projection>
-struct Traits<UnsafeKdTree<PointCloud, Projection>> {
-  static size_t
-  nearest_neighbor_search(const UnsafeKdTree<PointCloud, Projection> &tree,
-                          const Eigen::Vector2d &point, size_t *k_indices,
-                          double *k_sq_dists) {
-    return tree.nearest_neighbor_search(point, k_indices, k_sq_dists);
-  }
-
-  static size_t knn_search(const UnsafeKdTree<PointCloud, Projection> &tree,
-                           const Eigen::Vector2d &point, size_t k,
-                           size_t *k_indices, double *k_sq_dists) {
-    return tree.knn_search(point, k, k_indices, k_sq_dists);
-  }
-};
-
-template <typename PointCloud, typename Projection>
-struct Traits<KdTree<PointCloud, Projection>> {
-  static size_t
-  nearest_neighbor_search(const KdTree<PointCloud, Projection> &tree,
-                          const Eigen::Vector2d &point, size_t *k_indices,
-                          double *k_sq_dists) {
-    return tree.nearest_neighbor_search(point, k_indices, k_sq_dists);
-  }
-
-  static size_t knn_search(const KdTree<PointCloud, Projection> &tree,
-                           const Eigen::Vector2d &point, size_t k,
-                           size_t *k_indices, double *k_sq_dists) {
-    return tree.knn_search(point, k, k_indices, k_sq_dists);
-  }
-};
-
-} // namespace traits
-
 } // namespace icp2d

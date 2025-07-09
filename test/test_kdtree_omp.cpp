@@ -24,7 +24,7 @@ public:
 namespace icp2d {
 namespace traits {
 
-template <> struct Traits<SimplePointCloud2D> {
+template <> struct PointCloudTraits<SimplePointCloud2D> {
   static size_t size(const SimplePointCloud2D &cloud) {
     return cloud.points.size();
   }

@@ -1,81 +1,87 @@
+// SPDX-FileCopyrightText: Copyright 2024 Kenji Koide
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/Eigen>
+#include <memory>
 #include <vector>
+
+// Forward declare KdTree to avoid circular dependency
+namespace icp2d {
+struct AxisAlignedProjection;
+template <typename PointCloud, typename Projection> class KdTree;
+} // namespace icp2d
 
 namespace icp2d {
 namespace traits {
 
-/// @brief Traits interface cho point cloud
-template <typename T> struct Traits;
 
-/// @brief Traits specialization cho vector<Eigen::Vector2d>
-template <> struct Traits<std::vector<Eigen::Vector2d>> {
-  using PointType = Eigen::Vector2d;
+/// @brief Point cloud traits for accessing points and normals
+template <typename PointCloud> struct PointCloudTraits {
+  static size_t size(const PointCloud &cloud) { return cloud.size(); }
 
-  static size_t size(const std::vector<Eigen::Vector2d> &points) {
-    return points.size();
+  static bool has_points(const PointCloud &) { return true; }
+
+  static bool has_normals(const PointCloud &) { return false; }
+
+  static Eigen::Vector2d point(const PointCloud &cloud, size_t index) {
+    return cloud[index];
   }
 
-  static const Eigen::Vector2d &
-  point(const std::vector<Eigen::Vector2d> &points, size_t i) {
-    return points[i];
-  }
-
-  static bool has_normals(const std::vector<Eigen::Vector2d> &points) {
-    (void)points;
-    return false;
-  }
-
-  static bool has_covs(const std::vector<Eigen::Vector2d> &points) {
-    (void)points;
-    return false;
-  }
-
-  static Eigen::Vector2d normal(const std::vector<Eigen::Vector2d> &points,
-                                size_t                              i) {
-    (void)points;
-    (void)i;
-    throw std::runtime_error("Vector<Vector2d> does not have normals");
-  }
-
-  static Eigen::Matrix2d cov(const std::vector<Eigen::Vector2d> &points,
-                             size_t                              i) {
-    (void)points;
-    (void)i;
-    throw std::runtime_error("Vector<Vector2d> does not have covariances");
+  static Eigen::Vector2d normal(const PointCloud &cloud, size_t index) {
+    throw std::runtime_error("Normals not available for this point cloud type");
   }
 };
 
-/// @brief Helper function để lấy kích thước của point cloud
-template <typename T> size_t size(const T &points) {
-  return Traits<T>::size(points);
+// Template specialization for std::vector<Eigen::Vector2d>
+template <> struct PointCloudTraits<std::vector<Eigen::Vector2d>> {
+  static size_t size(const std::vector<Eigen::Vector2d> &cloud) {
+    return cloud.size();
+  }
+
+  static bool has_points(const std::vector<Eigen::Vector2d> &) { return true; }
+
+  static bool has_normals(const std::vector<Eigen::Vector2d> &) {
+    return false;
+  }
+
+  static Eigen::Vector2d point(const std::vector<Eigen::Vector2d> &cloud,
+                               size_t                              index) {
+    return cloud[index];
+  }
+
+  static Eigen::Vector2d normal(const std::vector<Eigen::Vector2d> &cloud,
+                                size_t                              index) {
+    throw std::runtime_error(
+        "Normals not available for std::vector<Eigen::Vector2d>");
+  }
+};
+
+
+// Convenience functions that use the traits
+template <typename PointCloud> size_t size(const PointCloud &cloud) {
+  return PointCloudTraits<PointCloud>::size(cloud);
 }
 
-/// @brief Helper function để lấy điểm thứ i từ point cloud
-template <typename T> auto point(const T &points, size_t i) {
-  return Traits<T>::point(points, i);
+template <typename PointCloud> bool has_points(const PointCloud &cloud) {
+  return PointCloudTraits<PointCloud>::has_points(cloud);
 }
 
-/// @brief Helper function để kiểm tra có normal hay không
-template <typename T> bool has_normals(const T &points) {
-  return Traits<T>::has_normals(points);
+template <typename PointCloud> bool has_normals(const PointCloud &cloud) {
+  return PointCloudTraits<PointCloud>::has_normals(cloud);
 }
 
-/// @brief Helper function để kiểm tra có covariance hay không
-template <typename T> bool has_covs(const T &points) {
-  return Traits<T>::has_covs(points);
+template <typename PointCloud>
+Eigen::Vector2d point(const PointCloud &cloud, size_t index) {
+  return PointCloudTraits<PointCloud>::point(cloud, index);
 }
 
-/// @brief Helper function để lấy normal thứ i từ point cloud
-template <typename T> auto normal(const T &points, size_t i) {
-  return Traits<T>::normal(points, i);
+template <typename PointCloud>
+Eigen::Vector2d normal(const PointCloud &cloud, size_t index) {
+  return PointCloudTraits<PointCloud>::normal(cloud, index);
 }
 
-/// @brief Helper function để lấy covariance thứ i từ point cloud
-template <typename T> auto cov(const T &points, size_t i) {
-  return Traits<T>::cov(points, i);
-}
 
 } // namespace traits
 } // namespace icp2d
