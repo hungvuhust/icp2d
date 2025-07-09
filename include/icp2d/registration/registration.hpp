@@ -1,16 +1,15 @@
-// SPDX-FileCopyrightText: Copyright 2024 Kenji Koide
-// SPDX-License-Identifier: MIT
+
 #pragma once
 
-#include <icp2d/core/traits.hpp>
 #include <icp2d/core/kdtree.hpp>
 #include <icp2d/core/projection.hpp>
+#include <icp2d/core/traits.hpp>
 #include <icp2d/registration/optimizer.hpp>
+#include <icp2d/registration/point_to_line_icp_factor.hpp>
+#include <icp2d/registration/reduction.hpp>
 #include <icp2d/registration/registration_result.hpp>
 #include <icp2d/registration/rejector.hpp>
 #include <icp2d/registration/termination_criteria.hpp>
-#include <icp2d/registration/point_to_line_icp_factor.hpp>
-#include <icp2d/registration/reduction.hpp>
 #include <icp2d/util/general_factor.hpp>
 #include <icp2d/util/point_icp_factor.hpp>
 #include <icp2d/util/robust_kernel.hpp>
@@ -41,9 +40,8 @@ public:
   /// @param T_init Initial transformation guess (optional)
   /// @return true if estimation successful
   template <typename TargetPointCloud, typename SourcePointCloud>
-  bool estimate(const TargetPointCloud &target,
-                const SourcePointCloud &source,
-                Eigen::Isometry2d      *T_est) const {
+  bool estimate(const TargetPointCloud &target, const SourcePointCloud &source,
+                Eigen::Isometry2d *T_est) const {
     if (!T_est) {
       return false;
     }
@@ -65,20 +63,21 @@ public:
 
     // Create point-to-line factors
     std::vector<HuberPointToLineICPFactor> factors(traits::size(source));
-    
+
     // Create reduction and general factor
     PointFactorReduction reduction;
-    NullFactor general_factor;
-    
+    NullFactor           general_factor;
+
     // Run optimization
-    auto result = optimizer.optimize(target, source, target_tree, rejector_,
-                                     criteria_, reduction, *T_est, factors, general_factor);
+    auto result =
+        optimizer.optimize(target, source, target_tree, rejector_, criteria_,
+                           reduction, *T_est, factors, general_factor);
 
     if (!result.converged) {
       std::cerr << "Warning: Optimization failed" << std::endl;
       return false;
     }
-    
+
     *T_est = result.T_target_source;
     return result.error < criteria_.eps_error;
   }
